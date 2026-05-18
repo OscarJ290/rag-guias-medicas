@@ -31,6 +31,18 @@ print("Cargando modelo de embeddings...")
 embed_model = SentenceTransformer(MODEL_NAME)
 
 print("Conectando a ChromaDB...")
+# Detectar y limpiar sqlite corrupto
+sqlite_path = CHROMA_DIR / "chroma.sqlite3"
+if sqlite_path.exists():
+    import sqlite3 as _sqlite3
+    try:
+        _conn = _sqlite3.connect(str(sqlite_path))
+        _conn.execute("PRAGMA integrity_check")
+        _conn.close()
+    except Exception as _e:
+        print(f"⚠️  chroma.sqlite3 corrupto ({_e}), eliminando...")
+        sqlite_path.unlink()
+
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
 collection = None
@@ -171,3 +183,4 @@ def serve_frontend():
     return FileResponse(FRONTEND_DIR / "index.html")
 
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
