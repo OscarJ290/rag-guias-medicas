@@ -12,7 +12,6 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 import chromadb
-from sentence_transformers import SentenceTransformer
 import anthropic
 import os
 from dotenv import load_dotenv
@@ -22,15 +21,12 @@ load_dotenv()
 # ── Configuración ──────────────────────────────────────────────
 CHROMA_DIR   = Path(os.getenv("CHROMA_DIR", "data/chroma_db"))
 COLLECTION   = "guias_medicas"
-MODEL_NAME   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 N_RESULTS    = 5
 HAIKU_MODEL  = "claude-haiku-4-5"
 
-# ── Inicialización (una sola vez al arrancar) ──────────────────
-print("Cargando modelo de embeddings...")
-embed_model = SentenceTransformer(MODEL_NAME)
-
+# ── Inicialización ─────────────────────────────────────────────
 print("Conectando a ChromaDB...")
+
 # Detectar y limpiar sqlite corrupto
 sqlite_path = CHROMA_DIR / "chroma.sqlite3"
 if sqlite_path.exists():
@@ -124,15 +120,13 @@ def preguntar(body: Pregunta):
     import traceback
     try:
         if collection is None:
-            raise HTTPException(status_code=503, detail="El índice no está disponible. Contacta al administrador.")
+            raise HTTPException(status_code=503, detail="El índice no está disponible.")
 
         if not body.texto.strip():
             raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía.")
 
-        embedding = embed_model.encode([body.texto]).tolist()
-
         resultados = collection.query(
-            query_embeddings=embedding,
+            query_texts=[body.texto],
             n_results=N_RESULTS,
             include=["documents", "metadatas", "distances"]
         )
@@ -183,4 +177,3 @@ def serve_frontend():
     return FileResponse(FRONTEND_DIR / "index.html")
 
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
-
