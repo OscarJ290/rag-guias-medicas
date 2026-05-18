@@ -2,10 +2,13 @@
 Backend RAG - Guías Médicas
 POST /preguntar  → pregunta → ChromaDB → Claude Haiku → respuesta + fuente
 GET  /health     → Railway healthcheck
+GET  /           → sirve el frontend
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 import chromadb
@@ -159,3 +162,12 @@ def preguntar(body: Pregunta):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+# ── Frontend (debe ir al final) ────────────────────────────────
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+@app.get("/")
+def serve_frontend():
+    return FileResponse(FRONTEND_DIR / "index.html")
+
+app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
