@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Configuración ──────────────────────────────────────────────
-CHROMA_DIR   = Path("data/chroma_db")
+CHROMA_DIR   = Path(os.getenv("CHROMA_DIR", "data/chroma_db"))
 COLLECTION   = "guias_medicas"
 MODEL_NAME   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 N_RESULTS    = 5
@@ -29,12 +29,16 @@ embed_model = SentenceTransformer(MODEL_NAME)
 
 print("Conectando a ChromaDB...")
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-collection = chroma_client.get_collection(COLLECTION)
+
+collection = None
+try:
+    collection = chroma_client.get_collection(COLLECTION)
+    print(f"✅ Backend listo — {collection.count()} chunks indexados")
+except Exception:
+    print("⚠️  Colección no encontrada — sube el chroma_db al Volume y redeploya.")
 
 print("Inicializando cliente Anthropic...")
 ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-print(f"✅ Backend listo — {collection.count()} chunks indexados")
 
 # ── App ────────────────────────────────────────────────────────
 app = FastAPI(title="RAG Guías Médicas")
@@ -97,12 +101,16 @@ INSTRUCCIONES DE RESPUESTA:
 # ── Endpoints ──────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "chunks": collection.count()}
+    chunks = collection.count() if collection else 0
+    return {"status": "ok", "chunks": chunks}
 
 @app.post("/preguntar", response_model=Respuesta)
 def preguntar(body: Pregunta):
     import traceback
     try:
+        if collection is None:
+            raise HTTPException(status_code=503, detail="El índice no está disponible. Contacta al administrador.")
+
         if not body.texto.strip():
             raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía.")
 
@@ -146,6 +154,8 @@ def preguntar(body: Pregunta):
 
         return Respuesta(respuesta=respuesta_texto, fuentes=fuentes)
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
