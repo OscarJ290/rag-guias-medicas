@@ -1,0 +1,151 @@
+"""
+Backend RAG - Guías Médicas
+POST /preguntar  → pregunta → ChromaDB → Claude Haiku → respuesta + fuente
+GET  /health     → Railway healthcheck
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from pathlib import Path
+import chromadb
+from sentence_transformers import SentenceTransformer
+import anthropic
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Configuración ──────────────────────────────────────────────
+CHROMA_DIR   = Path("data/chroma_db")
+COLLECTION   = "guias_medicas"
+MODEL_NAME   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+N_RESULTS    = 5
+HAIKU_MODEL  = "claude-haiku-4-5"
+
+# ── Inicialización (una sola vez al arrancar) ──────────────────
+print("Cargando modelo de embeddings...")
+embed_model = SentenceTransformer(MODEL_NAME)
+
+print("Conectando a ChromaDB...")
+chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+collection = chroma_client.get_collection(COLLECTION)
+
+print("Inicializando cliente Anthropic...")
+ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+print(f"✅ Backend listo — {collection.count()} chunks indexados")
+
+# ── App ────────────────────────────────────────────────────────
+app = FastAPI(title="RAG Guías Médicas")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Modelos ────────────────────────────────────────────────────
+class Pregunta(BaseModel):
+    texto: str
+
+class Fuente(BaseModel):
+    archivo: str
+    pagina: int
+    fragmento: str
+
+class Respuesta(BaseModel):
+    respuesta: str
+    fuentes: list[Fuente]
+
+# ── Prompt ─────────────────────────────────────────────────────
+SYSTEM_PROMPT = """Eres un asistente médico especializado en Guías de Práctica Clínica (GPC) mexicanas.
+
+Tu tarea es responder preguntas usando ÚNICAMENTE la información de los fragmentos proporcionados.
+
+REGLAS:
+1. Si la pregunta tiene opciones (A), B), C)...), indica cuál es la correcta según la GPC.
+2. Siempre cita el fragmento exacto de la GPC que respalda tu respuesta.
+3. Sé claro y directo. No inventes información que no esté en los fragmentos.
+4. Si los fragmentos no contienen información suficiente, dilo explícitamente.
+5. Responde siempre en español."""
+
+def construir_prompt(pregunta: str, chunks: list[dict]) -> str:
+    contexto = ""
+    for i, chunk in enumerate(chunks, 1):
+        contexto += (
+            f"\n[Fragmento {i}]\n"
+            f"Archivo: {chunk['archivo']} | Página: {chunk['pagina']}\n"
+            f"Texto: {chunk['texto']}\n"
+        )
+
+    return f"""Usa los siguientes fragmentos de Guías de Práctica Clínica para responder la pregunta.
+
+FRAGMENTOS:
+{contexto}
+
+PREGUNTA:
+{pregunta}
+
+INSTRUCCIONES DE RESPUESTA:
+- Si hay opciones (A, B, C...), indica cuál es correcta y por qué según la GPC.
+- Cita el fragmento relevante entre comillas.
+- Indica el nombre del archivo y página al final como: [Fuente: NOMBRE_PDF, p. X]
+- Si ningún fragmento responde la pregunta, dilo claramente."""
+
+# ── Endpoints ──────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok", "chunks": collection.count()}
+
+@app.post("/preguntar", response_model=Respuesta)
+def preguntar(body: Pregunta):
+    import traceback
+    try:
+        if not body.texto.strip():
+            raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía.")
+
+        embedding = embed_model.encode([body.texto]).tolist()
+
+        resultados = collection.query(
+            query_embeddings=embedding,
+            n_results=N_RESULTS,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        chunks = [
+            {
+                "texto":   doc,
+                "archivo": meta["archivo"],
+                "pagina":  meta["pagina"],
+            }
+            for doc, meta in zip(
+                resultados["documents"][0],
+                resultados["metadatas"][0]
+            )
+        ]
+
+        mensaje = ai_client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": construir_prompt(body.texto, chunks)}]
+        )
+
+        respuesta_texto = mensaje.content[0].text
+
+        fuentes = [
+            Fuente(
+                archivo=c["archivo"],
+                pagina=c["pagina"],
+                fragmento=c["texto"][:300]
+            )
+            for c in chunks
+        ]
+
+        return Respuesta(respuesta=respuesta_texto, fuentes=fuentes)
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
