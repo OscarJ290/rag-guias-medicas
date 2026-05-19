@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 import chromadb
+from sentence_transformers import SentenceTransformer
 import anthropic
 import os
 from dotenv import load_dotenv
@@ -21,10 +22,14 @@ load_dotenv()
 # ── Configuración ──────────────────────────────────────────────
 CHROMA_DIR   = Path(os.getenv("CHROMA_DIR", "data/chroma_db"))
 COLLECTION   = "guias_medicas"
+MODEL_NAME   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 N_RESULTS    = 5
 HAIKU_MODEL  = "claude-haiku-4-5"
 
 # ── Inicialización ─────────────────────────────────────────────
+print("Cargando modelo de embeddings...")
+embed_model = SentenceTransformer(MODEL_NAME)
+
 print("Conectando a ChromaDB...")
 
 # Detectar y limpiar sqlite corrupto
@@ -125,8 +130,10 @@ def preguntar(body: Pregunta):
         if not body.texto.strip():
             raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía.")
 
+        embedding = embed_model.encode([body.texto]).tolist()
+
         resultados = collection.query(
-            query_texts=[body.texto],
+            query_embeddings=embedding,
             n_results=N_RESULTS,
             include=["documents", "metadatas", "distances"]
         )
